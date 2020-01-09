@@ -1,0 +1,316 @@
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include "max6675.h"
+
+#define DETECT 2  //zero cross detect
+#define GATE 9    //TRIAC gate
+#define PULSE 4   //trigger pulse width (counts)
+
+int i=20;
+int ktcSO =   10; 
+int ktcCS =   11; 
+int ktcCLK =  8;
+int out;
+int persen;
+
+float Kp=2.82298, Ki=0.010, Kd=0;
+float Input, Output, Setpoint=0;;
+
+String dataMasuk;
+const byte numChars = 32;
+char receivedChars[numChars];
+char tempChars[numChars];
+
+boolean newData = false;
+
+MAX6675 ktc(ktcCLK, ktcCS, ktcSO);
+
+void recvWithEndMarker() {
+    static byte ndx = 0;
+    char endMarker = ':';
+    char rc;
+    
+    while (Serial.available() > 0 && newData == false) {
+        rc = Serial.read();
+
+        if (rc != endMarker) {
+            receivedChars[ndx] = rc;
+            ndx++;
+            if (ndx >= numChars) {
+                ndx = numChars - 1;
+            }
+        }
+        else {
+            receivedChars[ndx] = '\0'; // terminate the string
+            ndx = 0;
+            newData = true;
+        }
+    }
+}
+void recvWithStartEndMarkers() {
+    static boolean recvInProgress = false;
+    static byte ndx = 0;
+    char startMarker = '<';
+    char endMarker = '>';
+    char rc;
+
+    while (Serial.available() > 0 && newData == false) {
+        rc = Serial.read();
+
+        if (recvInProgress == true) {
+            if (rc != endMarker) {
+                receivedChars[ndx] = rc;
+                ndx++;
+                if (ndx >= numChars) {
+                    ndx = numChars - 1;
+                }
+            }
+            else {
+                receivedChars[ndx] = '\0'; // terminate the string
+                recvInProgress = false;
+                ndx = 0;
+                newData = true;
+            }
+        }
+
+        else if (rc == startMarker) {
+            recvInProgress = true;
+        }
+    }
+}
+
+void parseData() {      // split the data into its parts
+
+    char * strtokIndx; // this is used by strtok() as an index
+
+    strtokIndx = strtok(tempChars,",");      // get the first part - the string
+    Kp = atof(strtokIndx); // copy it to messageFromPC
+ 
+    strtokIndx = strtok(NULL, ","); // this continues where the previous call left off
+    Ki = atof(strtokIndx);     // convert this part to an integer
+
+    strtokIndx = strtok(NULL, ",");
+    Kd = atof(strtokIndx);     // convert this part to a float
+
+    strtokIndx = strtok(NULL, ",");
+    Setpoint = atof(strtokIndx);     // convert this part to a float
+
+}
+
+void showNewData() {
+    if (newData == true) {
+        dataMasuk = receivedChars;
+        newData = false;
+    }
+}
+
+////PID//////////////////////////////////////////////////////////
+/*working variables*/
+unsigned long lastTime;
+float outputSum, lastInput;
+float kp, ki, kd;
+int SampleTime = 1000; //1 sec
+float outMin, outMax;
+bool inAuto = false;
+  
+#define MANUAL 0
+#define AUTOMATIC 1
+  
+#define DIRECT 0
+#define REVERSE 1
+int controllerDirection = DIRECT;
+  
+#define P_ON_M 0
+#define P_ON_E 1
+bool pOnE = true, pOnM = false;
+float pOnEKp, pOnMKp;
+ 
+ 
+void Compute()
+{
+   if(!inAuto) return;
+   unsigned long now = millis();
+   int timeChange = (now - lastTime);
+   if(timeChange>=SampleTime)
+   {
+    
+      /*Compute all the working error variables*/      
+      float error = Setpoint - Input;   
+      float dInput = (Input - lastInput);
+      outputSum+= (ki * error);  
+       
+      /*Add Proportional on Measurement, if P_ON_M is specified*/
+      if(pOnM) outputSum-= pOnMKp * dInput;
+       
+      if(outputSum > outMax) outputSum= outMax;      
+      else if(outputSum < outMin) outputSum= outMin;  
+     
+      /*Add Proportional on Error, if P_ON_E is specified*/
+      if(pOnE) Output = pOnEKp * error; 
+      else Output = 0;
+       
+      /*Compute Rest of PID Output*/
+      Output += outputSum - kd * dInput; 
+    
+      if(Output > outMax) Output = outMax;
+      else if(Output < outMin) Output = outMin;
+  
+      /*Remember some variables for next time*/
+      lastInput = Input;
+      lastTime = now;
+   }
+}
+  
+void SetTunings(float Kp, float Ki, float Kd, float pOn)
+{
+   if (Kp<0 || Ki<0|| Kd<0 || pOn<0 || pOn>1) return;
+  
+   pOnE = pOn>0; //some p on error is desired;
+   pOnM = pOn<1; //some p on measurement is desired;  
+   
+   float SampleTimeInSec = ((float)SampleTime)/1000;
+   kp = Kp;
+   ki = Ki * SampleTimeInSec;
+   kd = Kd / SampleTimeInSec;
+  
+  if(controllerDirection ==REVERSE)
+   {
+      kp = (0 - kp);
+      ki = (0 - ki);
+      kd = (0 - kd);
+   }
+    
+   pOnEKp = pOn * kp; 
+   pOnMKp = (1 - pOn) * kp;
+}
+  
+void SetSampleTime(int NewSampleTime)
+{
+   if (NewSampleTime > 0)
+   {
+      float ratio  = (float)NewSampleTime
+                      / (float)SampleTime;
+      ki *= ratio;
+      kd /= ratio;
+      SampleTime = (unsigned long)NewSampleTime;
+   }
+}
+  
+void SetOutputLimits(float Min, float Max)
+{
+   if(Min > Max) return;
+   outMin = Min;
+   outMax = Max;
+  
+   if(Output > outMax) Output = outMax;
+   else if(Output < outMin) Output = outMin;
+  
+   if(outputSum > outMax) outputSum= outMax;
+   else if(outputSum < outMin) outputSum= outMin;
+}
+  
+void SetMode(int Mode)
+{
+    bool newAuto = (Mode == AUTOMATIC);
+    if(newAuto == !inAuto)
+    {  /*we just went from manual to auto*/
+        Initialize();
+    }
+    inAuto = newAuto;
+}
+  
+void Initialize()
+{
+   lastInput = Input;
+   outputSum = Output;
+   if(outputSum > outMax) outputSum= outMax;
+   else if(outputSum < outMin) outputSum= outMin;
+}
+  
+void SetControllerDirection(int Direction)
+{
+   controllerDirection = Direction;
+}
+/////////////////////////////////////////////////////////////////
+
+void setup() {
+
+  Serial.begin(9600);
+  delay(500);
+  Input = ktc.readCelsius();
+  Setpoint = 150;
+
+  pinMode(DETECT, INPUT);     //zero cross detect
+  digitalWrite(DETECT, HIGH); //enable pull-up resistor
+  pinMode(GATE, OUTPUT);      //TRIAC gate control
+
+  // set up Timer1 
+  //(see ATMEGA 328 data sheet pg 134 for more details)
+  OCR1A = 100;      //initialize the comparator
+  TIMSK1 = 0x03;    //enable comparator A and overflow interrupts
+  TCCR1A = 0x00;    //timer control registers set for
+  TCCR1B = 0x00;    //normal operation, timer disabled
+
+  // set up zero crossing interrupt
+  attachInterrupt(0,zeroCrossingInterrupt, RISING);    
+    //IRQ0 is pin 2. Call zeroCrossingInterrupt 
+    //on rising signal
+
+    SetMode(AUTOMATIC);
+    SetOutputLimits(20, 600);
+    SetTunings(Kp, Ki, Kd, 1);
+    SetControllerDirection(REVERSE);
+}
+
+//Interrupt Service Routines/////////////////////////////////////
+
+void zeroCrossingInterrupt(){ //zero cross detect   
+  TCCR1B=0x04; //start timer with divide by 256 input
+  TCNT1 = 0;   //reset timer - count from zero
+}
+
+ISR(TIMER1_COMPA_vect){ //comparator match
+  digitalWrite(GATE,HIGH);  //set TRIAC gate to high
+  TCNT1 = 65536-PULSE;      //trigger pulse width
+}
+
+ISR(TIMER1_OVF_vect){ //timer1 overflow
+  digitalWrite(GATE,LOW); //turn off TRIAC gate
+  TCCR1B = 0x00;          //disable timer stopd unintended triggers
+}
+/////////////////////////////////////////////////////////////////
+
+void loop() {
+  Compute();
+  
+  Input = ktc.readCelsius();
+  out = map(Output,20,600,600,20);
+  persen = map(Output,20,600,0,100);
+  OCR1A = out;
+  
+  Serial.print(ktc.readCelsius());
+  Serial.print(':');
+  Serial.print(Kp, 5);
+  Serial.print(':');
+  Serial.print(Ki, 8);
+  Serial.print(':');
+  Serial.print(Kd);
+  Serial.print(':');
+  Serial.print(persen);
+  Serial.print(':');
+  Serial.println(abs(Setpoint - ktc.readCelsius()));
+  
+  if(Serial.read() == 'p'){
+    recvWithStartEndMarkers();
+    if(newData == true) {
+      strcpy(tempChars, receivedChars);
+      parseData();
+      newData = false;
+    }
+  }
+  
+  
+    
+  delay (500);
+ 
+}
