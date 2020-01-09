@@ -1,0 +1,58 @@
+#include <Wire.h> #include <LiquidCrystal_I2C.h> #include "max6675.h" #include <PID_v1.h>
+LiquidCrystal_I2C lcda(0x27, 16, 2); // Set the LCD I2C address, if it's not working i'll try 0x27. LiquidCrystal_I2C lcdb(0x27, 16, 2); // Set the LCD I2C address, if it's not working i'll try 0x27.
+int AC_LOAD = 3; // Output to Opto Triac pin int dimming = 9000; // Dimming level (0-128) 0 = ON, 128 = OFF int ktcSO = 8; int ktcCS = 9; int ktcCLK = 10; unsigned long lastTemp;
+
+double temp, sp=160, outVal;
+double consKp=8, consKi=4.5, consKd=5;
+PID myPID(&temp, &outVal, &sp, consKp, consKi, consKd, REVERSE); MAX6675 ktc(ktcCLK, ktcCS, ktcSO);
+// Motor A
+int enA = 9; int in1 = 8; int in2 = 7;
+// Motor B
+int enB = 6; int in3 = 5; int in4 = 4;
+// Speed control potentiometers
+int SpeedControl1 = A0; int SpeedControl2 = A1;
+// Motor Speed Values - Start at zero
+int MotorSpeed1 = 0; int MotorSpeed2 = 0; signed int motor1Speed; signed int motor2Speed; int encoder_pin = 2; // The pin the encoder is connected int encoder2_pin = 3;
+
+unsigned int rpm; // rpm reading unsigned int rpm2; double calibrpm; double calibrpm2; volatile byte pulses,pulses2; // number of pulses unsigned long timeold,timeold2; // The number of pulses per revolution // depends on your index disc!! unsigned int pulsesperturn = 2;
+void setup() { lcd.init(); lcd.begin(16,2); lcd.backlight(); lcd.print("Connecting Data"); lcd.setCursor(0,1); lcd.print("Plate Temp. ...");
+Serial.begin(9600); delay(1500); pinMode(AC_LOAD, OUTPUT);// Set AC Load pin as output
+attachInterrupt(0, zero_crosss_int, RISING); // Choose the zero cross interrupt # from the table above temp = (1.46872*ktc.readCelsius())+0.79269;
+myPID.SetMode(AUTOMATIC); myPID.SetOutputLimits(0,100); delay(500); myPID.Compute(); // Set all the motor control pins to outputs
+
+Serial.begin(9600); pinMode(enA, OUTPUT); pinMode(enB, OUTPUT); pinMode(in1, OUTPUT); pinMode(in2, OUTPUT); pinMode(in3, OUTPUT); pinMode(in4, OUTPUT);
+Serial.begin(9600); lcd.init(); lcd.backlight(); pinMode(encoder_pin, INPUT); pinMode(encoder2_pin, INPUT); pinMode(motor1Speed , OUTPUT); pinMode(motor2Speed , OUTPUT); attachInterrupt(digitalPinToInterrupt(2), counter, RISING); attachInterrupt(digitalPinToInterrupt(3), counter2, RISING); pulses = 0; pulses2 = 0; rpm = 0; rpm2 = 0; timeold = 0; timeold2 = 0; calibrpm = 0; calibrpm2 = 0; }
+void zero_crosss_int() //function to be fired at the zero crossing to dim the light { // Firing angle calculation : 1 full 50Hz wave =1/50=20ms // Every zerocrossing thus: (50Hz)-> 10ms (1/2 Cycle) // For 60Hz => 8.33ms (10.000/120) // 10ms=10000us
+
+// (10000us - 10us) / 128 = 75 (Approx) For 60Hz =>65 dimming = map(outVal, 0, 100, 5000, 9000);
+//sp = map(analogRead(A0), 0, 1023, 50, 180);
+int dimtime = (dimming); // For 60Hz =>65 if (dimming == 9000){ digitalWrite(AC_LOAD, LOW); } else { delayMicroseconds(dimtime); // Wait till firing the TRIAC digitalWrite(AC_LOAD, HIGH); // Fire the TRIAC delayMicroseconds(10); // triac On propogation delay // (for 60Hz use 8.33) Some Triacs need a longer period digitalWrite(AC_LOAD, LOW); // No longer trigger the TRIAC (the next zero crossing will swith it off) TRIAC } }
+void loop() { temp = ktc.readCelsius(); sp = map(analogRead(A0), 0, 1023, 50, 180);
+Serial.println({String(temp) + "," + String(dimming) + "," + String(sp)}); //Serial.println(temp); delay(1000); myPID.Compute();
+delay(500); // Set Motor A forward
+
+digitalWrite(in1, HIGH); digitalWrite(in2, LOW);
+// Set Motor B forward
+digitalWrite(in3, HIGH); digitalWrite(in4, LOW);
+// Read the values from the potentiometers
+MotorSpeed1 = analogRead(SpeedControl2); MotorSpeed2 = analogRead(SpeedControl1);
+// Convert to range of 0-255
+MotorSpeed1 = map(MotorSpeed1, 0, 1023, 10, 100); MotorSpeed2 = map(MotorSpeed2, 0, 1023, 10, 100);
+// Adjust to prevent "buzzing" at very low speed
+if (MotorSpeed1 < 11)MotorSpeed1 = 0;
+if (MotorSpeed2 < 11)MotorSpeed2 = 0;
+// Set the motor speeds
+analogWrite(enA, MotorSpeed1); analogWrite(enB, MotorSpeed2); //Serial.println(MotorSpeed1); //Serial.println(MotorSpeed2); Serial.println({String(MotorSpeed1) + "," + String(MotorSpeed2) + "," + String(calibrpm2) + "," + String(calibrpm)});
+
+//Serial.println(calibrpm2); //Serial.println(calibrpm); sensorRPM1(); sensorRPM2();
+//Write it out to serial port lcda.clear(); lcda.setCursor(0, 0); lcda.print("Speed of Motor"); lcda.setCursor(0, 1); lcda.print("RPM = "); lcda.print((int)calibrpm2); lcda.setCursor(10, 1); lcda.print(", "); lcda.print((int)calibrpm); delay(2000); lcdb.clear(); lcdb.setCursor(0, 0); lcdb.print("Temperature"); lcdb.setCursor(0, 1); lcdb.print("C="); lcdb.print(temp); lcdb.setCursor(7, 1); lcdb.print(", SP="); lcdb.print(sp); }
+void sensorRPM1() { if (millis() - timeold >= 1000) { /*Uptade every one second, this will be equal to reading frecuency (Hz).*/
+//Don't process interrupts during calculations detachInterrupt(digitalPinToInterrupt(2));//Note that this would be 60*1000/(millis() - timeold)*pulses if the interrupt
+
+//happened once per revolution rpm = (60 * 1000 / pulsesperturn ) / (millis() - timeold) * pulses; timeold = millis(); pulses = 0; calibrpm = (rpm*0.97635)-415.19557; if (calibrpm<=0)calibrpm = 0;
+//Restart the interrupt processing attachInterrupt(digitalPinToInterrupt(2), counter, FALLING);
+} } void counter() { //Update count pulses++; }
+void sensorRPM2() { if (millis() - timeold2 >= 1000) { /*Uptade every one second, this will be equal to reading frecuency (Hz).*/
+//Don't process interrupts during calculations detachInterrupt(digitalPinToInterrupt(3)); //Note that this would be 60*1000/(millis() - timeold)*pulses if the interrupt //happened once per revolution rpm2 = (60 * 1000 / pulsesperturn ) / (millis() - timeold2) * pulses2; timeold2 = millis(); pulses2 = 0; calibrpm2 = (rpm2*1.02016)-20.11555; if (calibrpm2<=0)calibrpm2 = 0; //Restart the interrupt processing attachInterrupt(digitalPinToInterrupt(3), counter2, FALLING);
+
+} } void counter2() { //Update count2 pulses2++; }
